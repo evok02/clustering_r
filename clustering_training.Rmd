@@ -1,0 +1,349 @@
+---
+title: "tereshchenko_assignment3"
+author: "Hlib Tereshchenko"
+date: "2025-05-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Installing necessary packages
+
+```{r, include=FALSE}
+if (rstudioapi::isAvailable()) {
+   setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+ }
+
+using <- \(pkg) {
+  if (!rlang::is_installed(pkg)) 
+    install.packages(pkg, repo = "https://cloud.r-project.org")
+  library(pkg, character.only = TRUE)
+}
+
+# Libraries
+using("data.table")
+using("plotly")
+using("cluster") 
+using("factoextra") 
+using("corrplot")
+using("ggplot2")
+using("GGally")
+using("imager")
+using("dendextend")
+using("dbscan")
+
+```
+
+Data import
+
+```{r}
+#Importing the image with a label
+img <- imager::load.image("./data/hlib.jpg")
+plot(img)
+str(img)
+
+#Resize to 256x256 format
+img_resized <- imager::resize(img, size_x = 256, size_y = 256)
+plot(img_resized)
+str(img_resized)
+```
+Preprocessing
+
+```{r}
+#Convert it to the data table
+dt_img <- as.data.frame(img_resized, wide = "c")
+setDT(dt_img)
+
+#Set more comfortable names for columns
+setnames(dt_img, c("c.1", "c.2", "c.3"), c("R", "G", "B"))
+
+#Display as a plot
+plot_ly(data = dt_img,
+        x = ~x,
+        y = ~y,
+        type = "scattergl",
+        mode = "markers",
+        marker = list(color = ~rgb(R, G, B))) |>
+  layout(yaxis = list(autorange = "reversed", scaleanchor = "x", scaleratio = 1))
+```
+
+```{r}
+#Clustering
+dt_rgb <- dt_img[, .(R, G, B)]
+
+#EDA
+dt_rgb[,.N,.(R,G,B)][order(N)]
+uniqueN(dt_rgb[,.(R,G,B)])
+
+#Image has 19620 distinct colors
+```
+```{r}
+#Pairplot
+GGally::ggpairs(dt_rgb)
+
+#On the plot we can see density graphs diagonally, 
+#scatter plots in the lower triangle, and correlation coefficients
+#All of the channels have strong positive correlation, 
+#most of the values concentrated near 0 and 1
+
+```
+PCA
+
+```{r}
+#As we have multidimensional data, we proceed to PCA
+#Evaluation on principal components
+pca <- prcomp(dt_rgb, scale = T)
+summary(pca)
+
+#First principal component has 96,5% variance explained,
+#2nd is around 3%
+fviz_screeplot(pca, addlabels = TRUE)
+
+#All vectors are almost overlapping along 1st dimension
+#All channels have nearly perfect quality of representation
+fviz_pca_var(pca, col.var = "cos2", repel = T)
+fviz_cos2(pca, choice = "var", axes = 1)
+fviz_contrib(pca, choice = "var", axes = 1)
+
+#Representation using heatmaps
+vars <- get_pca_var(pca)
+plot_ly(x = colnames(vars$cos2), y = row.names(vars$cos2), z = vars$cos2, type = "heatmap", colors = "Reds")
+plot_ly(x = colnames(vars$contrib), y = row.names(vars$contrib), z = vars$contrib, type = "heatmap", colors = "Reds")
+
+#Representation of channels correlation using 3d scatter plot, as we can see they are strongly positively correlated
+plot_ly(data = dt_rgb, x = ~R, y = ~G, z = ~B, type = "scatter3d", mode = "markers", marker = list(size = 2))
+plot_ly(x = pca$x[,"PC1"], y = pca$x[,"PC2"], z = pca$x[,"PC3"],
+        type = "scatter3d", mode = "markers", marker = list(size = 2))
+```
+
+Choose appropriate k
+
+```{r}
+#Creating possible k series
+cls <- data.table(k = seq(2,20,2), WSS = 0)
+
+#Applying them for kmeans algorithm
+for (i in cls[, k]) {
+  cl <- kmeans(dt_rgb, centers = i, nstart = 30)
+  wss <- cl$tot.withinss
+  cls[k == i, WSS := wss]
+}
+
+#Most possible are from 4 to 6 using elbow method
+plot_ly(data = cls, type = "scatter", mode = "lines") |>
+  add_trace(x = ~k, y = ~WSS, name = "WSS")
+```
+
+Final clustering
+
+```{r}
+#Using 6 centroids
+km <- kmeans(dt_rgb, centers = 6, nstart = 20)
+dt_newimg <- data.table(
+  x = dt_img[, x],
+  y = dt_img[, y],
+  R = km$centers[km$cluster, "R"],
+  G = km$centers[km$cluster, "G"],
+  B = km$centers[km$cluster, "B"])
+
+#Visualizing clusters
+#As we can see, even though we reduced colors to 6, we can still distinct the name and many details on background
+plot_ly(data = dt_newimg,
+        x = ~x,
+        y = ~y,
+        type = "scattergl",
+        mode = "markers",
+        marker = list(color = ~rgb(R, G, B))) |>
+  layout(yaxis = list(autorange = "reversed", scaleanchor = "x", scaleratio = 1))
+
+fviz_cluster(km, data = dt_rgb) 
+```
+Data import for drilling dataset
+
+```{r}
+#Converting cdv file to DT
+dt_drilling <- fread("./data/drilling.csv")
+
+#Checking if there are any missing values
+colSums(is.na(dt_drilling))
+
+#No missing values? Perfect!
+```
+EDA
+
+```{r}
+#Performing basic data analysis
+
+#400 observations and 2 variables
+str(dt_drilling)
+
+#Specifying numerical columns
+my_numerical_columns <- colnames(dt_drilling[, .SD, .SDcols = is.numeric])
+
+#Visualization of 2 variables using scatter plot 
+plot_ly(dt_drilling,
+        x = ~`x`,
+        y = ~`y`,
+        type = "scatter",
+        mode = "markers")
+
+#obviously we can distinct 4 clusters, but I'll pretend that i don't see nothing
+
+#Also boxplot for each variable
+boxplots <- lapply(my_numerical_columns,
+                       function(col) {
+                         plot_ly(data   = dt_drilling,
+                                 y      = ~get(col),
+                                 type   = "box",
+                                 showlegend = FALSE) |>
+                           layout(yaxis = list(title = col))
+                       })
+
+#As we can see data pretty normalized but with some outliers
+subplot(boxplots, titleY = T, nrows = 2)
+```
+
+Distances
+
+```{r}
+#Get the euclidian distances
+distance <- get_dist(dt_drilling, method = "euclidean")
+
+#Represent using heatmap
+fviz_dist(distance)
+
+#We can distinct 4 red squares along diagonal, where the distance is the lowest
+#Probably our data set will contain 4 clusters
+```
+Clustering
+
+```{r}
+#Set 4 centroids
+cl <- kmeans(dt_drilling, centers = 6, nstart = 25)
+
+#between_SS to total_SS equal to 93.3%, which is pretty good result
+cl
+
+#But we can see that it was not the best choice of number k, some of the clusters are set pretty close, 
+#and scatterplot shows us the bias
+plot_ly(data = dt_drilling, x = ~x, y = ~y, color = as.character(cl$cluster),
+        type = "scatter", mode = "markers")
+```
+
+Analysis
+
+```{r}
+distance <- get_dist(dt_drilling, method = "euclidean")
+
+#We can see that silhouette score close to 0.48, which means it is acceptable but so strong
+fviz_silhouette(silhouette(cl$cluster, distance))
+```
+
+Choose k
+
+```{r}
+#Set serries from 1 to 10
+cls <- data.table(k = 1:10, WSS = 0, SS = 0)
+
+#Checking within sum of squared and silhouette score for each of the values k
+for (i in cls[, k]) {
+  cl <- kmeans(dt_drilling, centers = i, nstart = 25)
+  wss <- cl$tot.withinss
+  ss <- ifelse(i != 1, mean(silhouette(cl$cluster, dist(dt_drilling))[, 3]), 0)
+  cls[k == i, ':='(WSS = wss, SS = ss)]
+}
+
+#Visualizing using plot
+plot_ly(data = cls, type = "scatter", mode = "lines") |>
+  add_trace(x = ~k, y = ~WSS, name = "WSS") |>
+  add_trace(x = ~k, y = ~SS, yaxis = "y2", name = "Silhouette Score", line = list(dash = "dash")) |>
+  layout(yaxis2 = list(overlaying = "y", side = "right"))
+
+#As we can see that is the best choice, cause it is within elbow range and has the best Sscore
+```
+
+Final clusters
+```{r}
+cl <- kmeans(dt_drilling, centers = 4, nstart = 25)
+
+#With four clusters means set a little beat further from each other, which is a good sign
+cl
+
+#Also SS value increased which means we have better structure right now
+fviz_silhouette(silhouette(cl$cluster, distance))
+plot_ly(data = dt_drilling, x = ~x, y = ~y, color = as.character(cl$cluster),
+        type = "scatter", mode = "markers")
+```
+Hierarchical clustering
+
+```{r}
+#Scaling the dataset, cause as we could see on the boxplots, upper limits of x and y are a little bit different 
+dt_drilling_rescaled <- scale(dt_drilling)
+
+#New distance
+dist_rescaled <- get_dist(dt_drilling_rescaled, method = "euclidian")
+fviz_dist(distance)
+fviz_dist(dist_rescaled)
+
+#Actually clusters became less distinguishble, so i guess it was not neccessary
+hcl <- list()
+
+#Choose the linkage algorithm
+for (linkage in c("average", "single", "complete", "ward")) {
+  hcl[[linkage]] <- agnes(dist_rescaled, method = linkage)
+}
+
+#All of them are performing pretty well, Ward and Complete are the best methods
+sapply(hcl, \(x) x$ac)
+
+#Dendrogram for Ward and Complete the cleanest ones
+lapply(hcl, \(x) plot(x, which.plots = 2, main=paste0("Dendrogram for ", x$method, " linkage")))
+
+fviz_dend(hcl[["ward"]], k=4) 
+
+#Comparing Dendrograms for 3 and 4 clusters
+tanglegram(
+  dendlist(as.dendrogram(hcl[["complete"]]) |> set("labels_col", k=4) |> set("branches_k_color", k = 4),
+           as.dendrogram(hcl[["ward"]]) |> set("labels_col", k=3) |> set("branches_k_color", k = 3)),
+  common_subtrees_color_lines = FALSE,
+  highlight_distinct_edges  = TRUE,
+  highlight_branches_lwd=FALSE)
+
+#Cut for 4
+hcl_cut4 <- cutree(hcl[["ward"]], k=4)
+```
+
+Visualize the clusters
+```{r}
+fviz_cluster(list(data=dt_drilling_rescaled, cluster=hcl_cut4))
+fviz_silhouette(silhouette(hcl_cut4, dist_rescaled))
+#We have pretty strong structure, as SS close to 0.7
+```
+DBScan
+
+```{r}
+dbscan::kNNdistplot(dt_drilling, 4)
+#Somehow abline doesnt work in Rmd file
+#abline(h = 0.05, lty = 2)
+
+#Choose radius as 0.05 using elbow method
+cl_dbscan <- dbscan::dbscan(dt_drilling, eps = 0.05, minPts = 4)
+
+# Add cluster assignments to the data
+dt_drilling$cluster <- as.factor(cl_dbscan$cluster)
+
+# Then plot with plot_ly
+plot_ly(data = dt_drilling,
+        x = ~x,
+        y = ~y,
+        color = ~cluster,
+        type = "scatter",
+        mode = "markers")
+
+#As we can see some of the values are in the noise cluster, there is the difference from previous 2 methods, 
+#overall structure is the same, as we have pretty easy clustering task. 
+#So for this data set there is no big difference between the methods.
+```
+
